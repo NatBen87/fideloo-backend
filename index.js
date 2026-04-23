@@ -8,8 +8,27 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const TOKEN_SECRET = process.env.TOKEN_SECRET || 'fideloo-dev-secret';
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: [
+    'http://localhost:3001',
+    'https://fideloo-dashboard-git-main-natben87s-projects.vercel.app',
+    'https://fideloo-dashboard-clywqn3ov-natben87s-projects.vercel.app',
+    /\.vercel\.app$/,
+  ],
+  credentials: true,
+}));
+
 app.use(express.json());
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
+  });
+  next();
+});
 
 // --- HMAC token (no extra deps, uses Node built-in crypto) ---
 function generateToken(merchantId) {
@@ -58,23 +77,46 @@ function rateLimit(windowMs, max) {
   };
 }
 
+// --- Validation helpers ---
 function isValidEmail(e) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(e));
+}
+
+function sanitizeStr(s, maxLen = 255) {
+  return String(s || '').trim().slice(0, maxLen);
 }
 
 // ========================== ROUTES ==========================
 
 app.get('/', (req, res) => res.json({ message: 'Serveur Fideloo opérationnel ✅' }));
 
+// --- Health check ---
+app.get('/health', async (req, res) => {
+  let dbOk = false;
+  try {
+    const { error } = await supabase.from('merchants').select('id').limit(1);
+    dbOk = !error;
+  } catch {}
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    supabase: dbOk ? 'connected' : 'error',
+  });
+});
+
 // --- Merchants ---
 
 app.post('/merchants/register', async (req, res) => {
-  const { email, password, business_name, business_type } = req.body;
+  const email = sanitizeStr(req.body.email, 254).toLowerCase();
+  const password = sanitizeStr(req.body.password, 128);
+  const business_name = sanitizeStr(req.body.business_name, 100);
+  const business_type = sanitizeStr(req.body.business_type, 100);
+
   if (!email || !password || !business_name) {
     return res.status(400).json({ error: 'Email, mot de passe et nom du commerce sont requis.' });
   }
   if (!isValidEmail(email)) return res.status(400).json({ error: 'Email invalide.' });
-  if (String(password).length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum).' });
+  if (password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum).' });
 
   const bcrypt = require('bcrypt');
   const password_hash = await bcrypt.hash(password, 10);
@@ -90,7 +132,8 @@ app.post('/merchants/register', async (req, res) => {
 });
 
 app.post('/merchants/login', async (req, res) => {
-  const { email, password } = req.body;
+  const email = sanitizeStr(req.body.email, 254).toLowerCase();
+  const password = sanitizeStr(req.body.password, 128);
   if (!email || !password) return res.status(400).json({ error: 'Email et mot de passe requis.' });
 
   const bcrypt = require('bcrypt');
@@ -111,7 +154,7 @@ app.post('/merchants/login', async (req, res) => {
 app.get('/merchants/:id', async (req, res) => {
   const { data, error } = await supabase
     .from('merchants')
-    .select('id, business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit')
+    .select('id, business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit, reward_tiers')
     .eq('id', req.params.id)
     .single();
   if (error || !data) return res.status(404).json({ message: 'Commerce introuvable.' });
@@ -121,10 +164,23 @@ app.get('/merchants/:id', async (req, res) => {
 app.put('/merchants/:id', auth, async (req, res) => {
   const { id } = req.params;
   if (req.merchantId !== id) return res.status(403).json({ message: 'Accès refusé.' });
-  const { business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit } = req.body;
+
+  const business_name = sanitizeStr(req.body.business_name, 100);
+  const business_type = sanitizeStr(req.body.business_type, 100);
+  const primary_color = sanitizeStr(req.body.primary_color, 20);
+  const reward_description = sanitizeStr(req.body.reward_description, 200);
+  const reward_threshold = Math.max(1, Math.min(9999, Number(req.body.reward_threshold) || 10));
+  const points_per_visit = Math.max(1, Math.min(100, Number(req.body.points_per_visit) || 1));
+  const reward_tiers = Array.isArray(req.body.reward_tiers) ? req.body.reward_tiers.slice(0, 10) : undefined;
+  const onboarding_complete = req.body.onboarding_complete !== undefined ? Boolean(req.body.onboarding_complete) : undefined;
+
+  const updates = { business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit };
+  if (reward_tiers !== undefined) updates.reward_tiers = reward_tiers;
+  if (onboarding_complete !== undefined) updates.onboarding_complete = onboarding_complete;
+
   const { data, error } = await supabase
     .from('merchants')
-    .update({ business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit })
+    .update(updates)
     .eq('id', id)
     .select()
     .single();
@@ -134,16 +190,12 @@ app.put('/merchants/:id', auth, async (req, res) => {
 
 // --- Customers ---
 
-// Must be before /customers/:merchantId (3 segments vs 2 segments — no real conflict, but explicit ordering is clearer)
 app.get('/customers/find/:query', auth, async (req, res) => {
-  const q = req.params.query;
+  const q = sanitizeStr(req.params.query, 254);
   try {
     let data = null;
-    // ID exact
     ({ data } = await supabase.from('customers').select('*').eq('id', q).eq('merchant_id', req.merchantId).maybeSingle());
-    // Email exact
     if (!data) ({ data } = await supabase.from('customers').select('*').eq('email', q).eq('merchant_id', req.merchantId).maybeSingle());
-    // Name partial
     if (!data) {
       const r = await supabase.from('customers').select('*').eq('merchant_id', req.merchantId).ilike('name', `%${q}%`).limit(1).maybeSingle();
       data = r.data;
@@ -159,7 +211,7 @@ app.get('/customers/find/:query', auth, async (req, res) => {
 app.get('/customers/card/:customerId', async (req, res) => {
   const { data: customer, error } = await supabase
     .from('customers')
-    .select('id, name, points, merchant_id')
+    .select('id, name, points, merchant_id, referral_code')
     .eq('id', req.params.customerId)
     .single();
 
@@ -167,7 +219,7 @@ app.get('/customers/card/:customerId', async (req, res) => {
 
   const { data: merchant } = await supabase
     .from('merchants')
-    .select('business_name, primary_color, reward_threshold, reward_description')
+    .select('business_name, primary_color, reward_threshold, reward_description, reward_tiers')
     .eq('id', customer.merchant_id)
     .single();
 
@@ -188,17 +240,21 @@ app.get('/customers/:merchantId', auth, async (req, res) => {
 
 // Public — rate limited (customer self-registration from /join page)
 app.post('/customers', rateLimit(60_000, 10), async (req, res) => {
-  const { merchant_id, name, email } = req.body;
-  if (!merchant_id || !name?.trim() || !email?.trim()) {
+  const merchant_id = sanitizeStr(req.body.merchant_id, 36);
+  const name = sanitizeStr(req.body.name, 100);
+  const email = sanitizeStr(req.body.email, 254).toLowerCase();
+  const birthday = req.body.birthday ? sanitizeStr(req.body.birthday, 10) : null;
+  const ref_code = req.body.referral_code ? sanitizeStr(req.body.referral_code, 20) : null;
+
+  if (!merchant_id || !name || !email) {
     return res.status(400).json({ message: 'merchant_id, nom et email sont requis.' });
   }
   if (!isValidEmail(email)) return res.status(400).json({ message: 'Email invalide.' });
 
-  const normalizedEmail = email.toLowerCase().trim();
   const { data: existing } = await supabase
     .from('customers')
     .select('*')
-    .eq('email', normalizedEmail)
+    .eq('email', email)
     .eq('merchant_id', merchant_id)
     .maybeSingle();
 
@@ -206,13 +262,48 @@ app.post('/customers', rateLimit(60_000, 10), async (req, res) => {
     return res.status(400).json({ message: 'Ce client existe déjà pour ce commerce.', customer: existing });
   }
 
+  // Find referrer if referral code provided
+  let referrer = null;
+  if (ref_code) {
+    const { data: ref } = await supabase
+      .from('customers')
+      .select('id, points')
+      .eq('referral_code', ref_code)
+      .eq('merchant_id', merchant_id)
+      .maybeSingle();
+    referrer = ref || null;
+  }
+
+  const newReferralCode = crypto.randomBytes(4).toString('hex');
+  const insertData = {
+    merchant_id,
+    name,
+    email,
+    points: 0,
+    referral_code: newReferralCode,
+    referred_by: referrer?.id || null,
+  };
+  if (birthday) insertData.birthday = birthday;
+
   const { data, error } = await supabase
     .from('customers')
-    .insert([{ merchant_id, name: name.trim(), email: normalizedEmail, points: 0 }])
+    .insert([insertData])
     .select()
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Referral bonus: +3 points for both parties
+  if (referrer && data) {
+    const newRefPoints = (referrer.points || 0) + 3;
+    await supabase.from('customers').update({ points: newRefPoints }).eq('id', referrer.id);
+    await supabase.from('transactions').insert({ merchant_id, customer_id: referrer.id, points: 3 });
+    const bonusPoints = (data.points || 0) + 3;
+    await supabase.from('customers').update({ points: bonusPoints }).eq('id', data.id);
+    await supabase.from('transactions').insert({ merchant_id, customer_id: data.id, points: 3 });
+    const { data: updated } = await supabase.from('customers').select('*').eq('id', data.id).single();
+    return res.json({ ...(updated || data), referred: true });
+  }
 
   // Welcome email — only runs if RESEND_API_KEY is set in .env
   if (process.env.RESEND_API_KEY) {
@@ -227,12 +318,12 @@ app.post('/customers', rateLimit(60_000, 10), async (req, res) => {
         },
         body: JSON.stringify({
           from: 'Fideloo <noreply@fideloo.com>',
-          to: [normalizedEmail],
+          to: [email],
           subject: `Bienvenue chez ${mData?.business_name || 'notre commerce'} !`,
-          html: `<p>Bonjour ${name.trim()},</p><p>Votre carte fidélité chez <strong>${mData?.business_name || 'notre commerce'}</strong> est activée. Vous avez actuellement <strong>0 point</strong>.</p>`,
+          html: `<p>Bonjour ${name},</p><p>Votre carte fidélité chez <strong>${mData?.business_name || 'notre commerce'}</strong> est activée. Vous avez actuellement <strong>0 point</strong>.</p>`,
         }),
       });
-    } catch {} // fail silently — email is best-effort
+    } catch {} // fail silently
   }
 
   res.json(data);
@@ -274,9 +365,12 @@ app.post('/customers/:id/redeem', auth, async (req, res) => {
 // --- Transactions ---
 
 app.post('/transactions', auth, rateLimit(60_000, 30), async (req, res) => {
-  const { merchant_id, customer_id, points } = req.body;
-  if (!merchant_id || !customer_id || !points) {
-    return res.status(400).json({ message: 'merchant_id, customer_id et points sont requis.' });
+  const merchant_id = sanitizeStr(req.body.merchant_id, 36);
+  const customer_id = sanitizeStr(req.body.customer_id, 36);
+  const points = Math.max(1, Math.min(9999, Number(req.body.points) || 1));
+
+  if (!merchant_id || !customer_id) {
+    return res.status(400).json({ message: 'merchant_id et customer_id sont requis.' });
   }
   if (req.merchantId !== merchant_id) return res.status(403).json({ message: 'Accès refusé.' });
 
@@ -289,10 +383,11 @@ app.post('/transactions', auth, rateLimit(60_000, 30), async (req, res) => {
       .from('customers').select('points').eq('id', customer_id).single();
     if (fetchError) return res.status(400).json({ message: fetchError.message });
 
-    const newPoints = (customer.points || 0) + Number(points);
+    const newPoints = (customer.points || 0) + points;
+    const updatePayload = { points: newPoints, last_visit: new Date().toISOString() };
     const { data: updated, error: updateError } = await supabase
       .from('customers')
-      .update({ points: newPoints })
+      .update(updatePayload)
       .eq('id', customer_id)
       .select()
       .single();
@@ -325,7 +420,6 @@ app.get('/transactions/customer/:customerId', auth, async (req, res) => {
   res.json(data);
 });
 
-// All transactions for a merchant, enriched with customer name
 app.get('/transactions/merchant/:merchantId', auth, async (req, res) => {
   const { merchantId } = req.params;
   if (req.merchantId !== merchantId) return res.status(403).json({ message: 'Accès refusé.' });
@@ -339,7 +433,6 @@ app.get('/transactions/merchant/:merchantId', auth, async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  // Enrich with customer names in a single extra query
   const customerIds = [...new Set(txns.map(t => t.customer_id))];
   let customerMap = {};
   if (customerIds.length > 0) {
@@ -357,7 +450,133 @@ app.get('/transactions/merchant/:merchantId', auth, async (req, res) => {
   })));
 });
 
-// --- Global error handler (malformed JSON etc.) ---
+// --- Notifications ---
+//
+// Run in Supabase SQL editor before using these routes:
+//
+// CREATE TABLE IF NOT EXISTS notifications (
+//   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+//   merchant_id UUID REFERENCES merchants(id) ON DELETE CASCADE,
+//   title TEXT NOT NULL,
+//   message TEXT NOT NULL,
+//   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+// );
+//
+// CREATE TABLE IF NOT EXISTS notification_reads (
+//   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+//   notification_id UUID REFERENCES notifications(id) ON DELETE CASCADE,
+//   customer_id UUID REFERENCES customers(id) ON DELETE CASCADE,
+//   read_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+//   UNIQUE(notification_id, customer_id)
+// );
+//
+// ALTER TABLE merchants ADD COLUMN IF NOT EXISTS reward_tiers JSONB DEFAULT '[]'::jsonb;
+// ALTER TABLE merchants ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN DEFAULT false;
+// ALTER TABLE customers ADD COLUMN IF NOT EXISTS birthday DATE;
+// ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_code TEXT;
+// ALTER TABLE customers ADD COLUMN IF NOT EXISTS referred_by UUID REFERENCES customers(id);
+// ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_visit TIMESTAMP WITH TIME ZONE;
+
+app.post('/merchants/:id/notify', auth, async (req, res) => {
+  const { id } = req.params;
+  if (req.merchantId !== id) return res.status(403).json({ message: 'Accès refusé.' });
+
+  const title = sanitizeStr(req.body.title, 100);
+  const message = sanitizeStr(req.body.message, 500);
+
+  if (!title || !message) {
+    return res.status(400).json({ message: 'Titre et message sont requis.' });
+  }
+
+  const { data, error } = await supabase
+    .from('notifications')
+    .insert([{ merchant_id: id, title, message }])
+    .select()
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Count how many customers will receive it
+  const { count } = await supabase
+    .from('customers')
+    .select('id', { count: 'exact', head: true })
+    .eq('merchant_id', id);
+
+  res.json({ success: true, notification: data, recipients: count || 0 });
+});
+
+// Public — fetches unread notifications for a customer
+app.get('/notifications/customer/:customerId', async (req, res) => {
+  const { customerId } = req.params;
+
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('merchant_id')
+    .eq('id', customerId)
+    .single();
+
+  if (!customer) return res.status(404).json({ message: 'Client introuvable.' });
+
+  // Get all notifications for this merchant
+  const { data: notifications, error } = await supabase
+    .from('notifications')
+    .select('*')
+    .eq('merchant_id', customer.merchant_id)
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  if (error) return res.status(400).json({ error: error.message });
+  if (!notifications?.length) return res.json([]);
+
+  // Get already-read notification IDs for this customer
+  const { data: reads } = await supabase
+    .from('notification_reads')
+    .select('notification_id')
+    .eq('customer_id', customerId);
+
+  const readIds = new Set((reads || []).map(r => r.notification_id));
+  const unread = notifications.filter(n => !readIds.has(n.id));
+
+  res.json(unread);
+});
+
+// Public — mark all unread notifications as read for a customer
+app.post('/notifications/customer/:customerId/mark-read', async (req, res) => {
+  const { customerId } = req.params;
+
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('merchant_id')
+    .eq('id', customerId)
+    .single();
+
+  if (!customer) return res.status(404).json({ message: 'Client introuvable.' });
+
+  const { data: notifications } = await supabase
+    .from('notifications')
+    .select('id')
+    .eq('merchant_id', customer.merchant_id);
+
+  if (!notifications?.length) return res.json({ success: true });
+
+  const { data: reads } = await supabase
+    .from('notification_reads')
+    .select('notification_id')
+    .eq('customer_id', customerId);
+
+  const readIds = new Set((reads || []).map(r => r.notification_id));
+  const toInsert = notifications
+    .filter(n => !readIds.has(n.id))
+    .map(n => ({ notification_id: n.id, customer_id: customerId }));
+
+  if (toInsert.length > 0) {
+    await supabase.from('notification_reads').insert(toInsert);
+  }
+
+  res.json({ success: true, marked: toInsert.length });
+});
+
+// --- Global error handler ---
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ message: 'Corps de requête JSON invalide.' });
