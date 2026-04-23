@@ -12,11 +12,9 @@ const app = express();
 app.use(cors({
   origin: [
     'http://localhost:3001',
-    'https://fideloo-dashboard-git-main-natben87s-projects.vercel.app',
-    'https://fideloo-dashboard-clywqn3ov-natben87s-projects.vercel.app',
-    /\.vercel\.app$/,
+    'https://fideloo-dashboard.vercel.app'
   ],
-  credentials: true,
+  credentials: true
 }));
 
 app.use(express.json());
