@@ -10,11 +10,7 @@ const TOKEN_SECRET = process.env.TOKEN_SECRET || 'fideloo-dev-secret';
 const app = express();
 
 app.use(cors({
-  origin: [
-    'http://localhost:3001',
-    'https://fideloo-dashboard.vercel.app',
-    /\.vercel\.app$/,
-  ],
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -589,4 +585,4 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Serveur démarré sur http://localhost:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Serveur démarré sur http://localhost:${PORT}`));
