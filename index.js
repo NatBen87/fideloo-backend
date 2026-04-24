@@ -575,6 +575,38 @@ app.post('/notifications/customer/:customerId/mark-read', async (req, res) => {
   res.json({ success: true, marked: toInsert.length });
 });
 
+// --- Apple Wallet pass generation ---
+app.get('/passes/apple/:customerId', async (req, res) => {
+  const { customerId } = req.params;
+  try {
+    const { data: customer, error: cErr } = await supabase
+      .from('customers')
+      .select('id, name, points, merchant_id')
+      .eq('id', customerId)
+      .single();
+
+    if (cErr || !customer) return res.status(404).json({ message: 'Client introuvable.' });
+
+    const { data: merchant } = await supabase
+      .from('merchants')
+      .select('business_name, primary_color, reward_threshold, reward_description')
+      .eq('id', customer.merchant_id)
+      .single();
+
+    const { generateAppleWalletPass } = require('./passes/generate');
+    const buffer = await generateAppleWalletPass(customer, merchant || {});
+
+    res.set({
+      'Content-Type': 'application/vnd.apple.pkpass',
+      'Content-Disposition': 'attachment; filename=fideloo.pkpass',
+    });
+    res.send(buffer);
+  } catch (err) {
+    console.error('Erreur génération pass:', err);
+    res.status(500).json({ message: 'Erreur lors de la génération du pass Apple Wallet.' });
+  }
+});
+
 // --- Global error handler ---
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
