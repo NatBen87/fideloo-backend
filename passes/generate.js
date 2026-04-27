@@ -1,9 +1,5 @@
 'use strict';
 const { PKPass } = require('passkit-generator');
-const fs = require('fs');
-const path = require('path');
-
-const CERTS = path.join(__dirname, '..', 'certs');
 
 // Minimal 1×1 PNG placeholder — Apple Wallet requires icon.png in the bundle.
 // Replace with a real 29×29 (icon.png) and 58×58 (icon@2x.png) image for production.
@@ -22,6 +18,18 @@ function hexToRgb(hex) {
 }
 
 async function generateAppleWalletPass(customer, merchant) {
+  // Certificates are stored as Railway environment variables (multi-line PEM strings).
+  // Set APPLE_CERT_PEM, APPLE_KEY_PEM, APPLE_WWDR_PEM in the Railway dashboard.
+  const certPem  = process.env.APPLE_CERT_PEM;
+  const keyPem   = process.env.APPLE_KEY_PEM;
+  const wwdrPem  = process.env.APPLE_WWDR_PEM;
+
+  if (!certPem || !keyPem || !wwdrPem) {
+    throw new Error(
+      'Missing Apple Wallet env vars: APPLE_CERT_PEM, APPLE_KEY_PEM, APPLE_WWDR_PEM'
+    );
+  }
+
   const passJson = {
     passTypeIdentifier: 'pass.com.fideloo.fidelite',
     teamIdentifier: 'HK48W747TG',
@@ -57,9 +65,6 @@ async function generateAppleWalletPass(customer, merchant) {
     },
   };
 
-  // certs/wwdr.pem = Apple WWDR G4 certificate.
-  // Download from: https://www.apple.com/certificateauthority/AppleWWDRCAG4.cer
-  // Convert: openssl x509 -inform DER -in AppleWWDRCAG4.cer -out wwdr.pem
   const pass = await PKPass.from(
     {
       model: {
@@ -68,9 +73,9 @@ async function generateAppleWalletPass(customer, merchant) {
         'icon@2x.png': PLACEHOLDER_ICON,
       },
       certificates: {
-        wwdr: fs.readFileSync(path.join(CERTS, 'wwdr.pem')),
-        signerCert: fs.readFileSync(path.join(CERTS, 'fideloo-cert.pem')),
-        signerKey: fs.readFileSync(path.join(CERTS, 'fideloo.key')),
+        wwdr:       Buffer.from(wwdrPem),
+        signerCert: Buffer.from(certPem),
+        signerKey:  Buffer.from(keyPem),
       },
     },
     { serialNumber: customer.id }
