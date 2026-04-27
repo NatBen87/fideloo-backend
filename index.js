@@ -292,16 +292,15 @@ app.post('/customers', rateLimit(60_000, 10), async (req, res) => {
     referrer = ref || null;
   }
 
-  const newReferralCode = crypto.randomBytes(4).toString('hex');
   const insertData = {
     merchant_id,
     name,
     email,
     points: 0,
-    referral_code: newReferralCode,
-    referred_by: referrer?.id || null,
   };
   if (birthday) insertData.birthday = birthday;
+
+  console.log('[POST /customers] inserting:', JSON.stringify(insertData));
 
   const { data, error } = await supabase
     .from('customers')
@@ -309,7 +308,11 @@ app.post('/customers', rateLimit(60_000, 10), async (req, res) => {
     .select()
     .single();
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    console.log('[POST /customers] insert error:', JSON.stringify(error));
+    return res.status(400).json({ error: error.message });
+  }
+  console.log('[POST /customers] inserted id:', data?.id);
 
   // Referral bonus: +3 points for both parties
   if (referrer && data) {
