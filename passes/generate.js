@@ -1,12 +1,8 @@
 'use strict';
 const { PKPass } = require('passkit-generator');
-
-// Minimal 1×1 PNG placeholder — Apple Wallet requires icon.png in the bundle.
-// Replace with a real 29×29 (icon.png) and 58×58 (icon@2x.png) image for production.
-const PLACEHOLDER_ICON = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAABmJLR0QA/wD/AP+gvaeTAAAADUlEQVQI12P4//8/AwAI/AL+hc2rNAAAAABJRU5ErkJggg==',
-  'base64'
-);
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 function hexToRgb(hex) {
   if (!hex || !hex.startsWith('#') || hex.length < 7) return 'rgb(245, 158, 11)';
@@ -18,23 +14,24 @@ function hexToRgb(hex) {
 }
 
 async function generateAppleWalletPass(customer, merchant) {
-  // Certificates are stored as Railway environment variables (multi-line PEM strings).
-  // Set APPLE_CERT_PEM, APPLE_KEY_PEM, APPLE_WWDR_PEM in the Railway dashboard.
-  const certPem  = process.env.APPLE_CERT_PEM;
-  const keyPem   = process.env.APPLE_KEY_PEM;
-  const wwdrPem  = process.env.APPLE_WWDR_PEM;
+  const certPem = process.env.APPLE_CERT_PEM;
+  const keyPem = process.env.APPLE_KEY_PEM;
+  const wwdrPem = process.env.APPLE_WWDR_PEM;
 
   if (!certPem || !keyPem || !wwdrPem) {
-    throw new Error(
-      'Missing Apple Wallet env vars: APPLE_CERT_PEM, APPLE_KEY_PEM, APPLE_WWDR_PEM'
-    );
+    throw new Error('Missing Apple Wallet env vars');
   }
+
+  const PLACEHOLDER_ICON = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAABmJLR0QA/wD/AP+gvaeTAAAADUlEQVQI12P4//8/AwAI/AL+hc2rNAAAAABJRU5ErkJggg==',
+    'base64'
+  );
 
   const passJson = {
     passTypeIdentifier: 'pass.com.fideloo.fidelite',
     teamIdentifier: 'HK48W747TG',
     organizationName: merchant.business_name || 'Fideloo',
-    description: `Carte fidélité ${merchant.business_name || 'Fideloo'}`,
+    description: `Carte fidelite ${merchant.business_name || 'Fideloo'}`,
     serialNumber: customer.id,
     formatVersion: 1,
     backgroundColor: hexToRgb(merchant.primary_color),
@@ -42,46 +39,41 @@ async function generateAppleWalletPass(customer, merchant) {
     labelColor: 'rgb(255, 255, 255)',
     storeCard: {
       headerFields: [
-        { key: 'points', label: 'Points', value: String(customer.points ?? 0) },
+        { key: 'points', label: 'Points', value: String(customer.points ?? 0) }
       ],
       primaryFields: [
-        { key: 'name', label: 'Client', value: customer.name },
+        { key: 'name', label: 'Client', value: customer.name || 'Client' }
       ],
       secondaryFields: [
-        {
-          key: 'reward',
-          label: 'Récompense',
-          value: merchant.reward_description || '1 récompense offerte',
-        },
+        { key: 'reward', label: 'Recompense', value: merchant.reward_description || '1 recompense offerte' }
       ],
       backFields: [
         { key: 'commerce', label: 'Commerce', value: merchant.business_name || '' },
-        {
-          key: 'objectif',
-          label: 'Points pour récompense',
-          value: String(merchant.reward_threshold ?? 10),
-        },
-      ],
-    },
+        { key: 'objectif', label: 'Points pour recompense', value: String(merchant.reward_threshold ?? 10) }
+      ]
+    }
   };
 
-  const pass = await PKPass.from(
-    {
-      model: {
-        'pass.json': Buffer.from(JSON.stringify(passJson)),
-        'icon.png': PLACEHOLDER_ICON,
-        'icon@2x.png': PLACEHOLDER_ICON,
-      },
-      certificates: {
-        wwdr:       Buffer.from(wwdrPem),
-        signerCert: Buffer.from(certPem),
-        signerKey:  Buffer.from(keyPem),
-      },
-    },
-    { serialNumber: customer.id }
-  );
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'));
+  const modelDir = path.join(tmpDir, 'fideloo.pass');
+  fs.mkdirSync(modelDir);
 
-  return pass.getAsBuffer();
+  fs.writeFileSync(path.join(modelDir, 'pass.json'), JSON.stringify(passJson));
+  fs.writeFileSync(path.join(modelDir, 'icon.png'), PLACEHOLDER_ICON);
+  fs.writeFileSync(path.join(modelDir, 'icon@2x.png'), PLACEHOLDER_ICON);
+
+  const pass = await PKPass.from({
+    model: modelDir,
+    certificates: {
+      wwdr: Buffer.from(wwdrPem),
+      signerCert: Buffer.from(certPem),
+      signerKey: Buffer.from(keyPem),
+    }
+  }, { serialNumber: customer.id });
+
+  const buffer = pass.getAsBuffer();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  return buffer;
 }
 
 module.exports = { generateAppleWalletPass };
