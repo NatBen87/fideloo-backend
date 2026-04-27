@@ -151,13 +151,32 @@ app.post('/merchants/login', async (req, res) => {
 
 // Public — no auth (used by /join page)
 app.get('/merchants/:id', async (req, res) => {
-  const { data, error } = await supabase
+  const { id } = req.params;
+  console.log(`[GET /merchants/:id] id received: "${id}"`);
+
+  // Try full select first; fall back without reward_tiers if the column doesn't exist yet
+  let data, error;
+  ({ data, error } = await supabase
     .from('merchants')
     .select('id, business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit, reward_tiers')
-    .eq('id', req.params.id)
-    .single();
+    .eq('id', id)
+    .single());
+
+  if (error) {
+    console.log(`[GET /merchants/:id] first query error: ${error.message} (code: ${error.code})`);
+    // reward_tiers column may not exist yet — retry without it
+    ({ data, error } = await supabase
+      .from('merchants')
+      .select('id, business_name, business_type, primary_color, reward_threshold, reward_description, points_per_visit')
+      .eq('id', id)
+      .single());
+    console.log(`[GET /merchants/:id] fallback query — data: ${data ? 'found' : 'null'}, error: ${error?.message}`);
+  } else {
+    console.log(`[GET /merchants/:id] data: ${data ? 'found' : 'null'}`);
+  }
+
   if (error || !data) return res.status(404).json({ message: 'Commerce introuvable.' });
-  res.json(data);
+  res.json({ reward_tiers: [], ...data });
 });
 
 app.put('/merchants/:id', auth, async (req, res) => {
